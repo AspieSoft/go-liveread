@@ -7,7 +7,7 @@ import (
 )
 
 func Test(t *testing.T){
-	reader, err := Read("test.txt")
+	reader, err := Read[uint8]("test.txt")
 	if err != nil {
 		t.Error(err)
 		return

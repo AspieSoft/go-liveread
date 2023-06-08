@@ -3,20 +3,27 @@ package liveread
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"time"
 )
 
-// max length for uint8
-const readMaxLen uint = 256
+// ERROR_EOF is an alias of `io.EOF`
+var ERROR_EOF error = io.EOF
 
-// max buffer size to read at a time
-const readBufSize uint = 10
+// ERROR_EOF_Save is only returned when using restore points
+//
+// in most cases, you will need to use `io.EOF` to check for EOF errors
+var ERROR_EOF_Save error = errors.New("EOF_Save")
+
 
 type Reader struct {
 	// buf *map[uint8]byte
 	buf *[]byte
+	maxLen uint
+	bufSize uint
+
 	overflow *[]byte
 	start *uint8
 	ind *uint8
@@ -28,15 +35,59 @@ type Reader struct {
 	reading *bool
 	handlingOverflow *uint
 	handlingDiscard *uint
+
+	savedBytes *[][]byte
+	readSave *[]readRestore
 }
 
-func Read(path string) (*Reader, error) {
+type readRestore struct {
+	save uint
+	ind *uint
+	next bool
+}
+
+type maxLenOpts interface{uint8|uint16}
+func getMaxLen[T maxLenOpts]() uint {
+	var t interface{} = uint8(0)
+	if _, ok := t.(T); ok {
+		return 256
+	}
+
+	t = uint16(0)
+	if _, ok := t.(T); ok {
+		return 65536
+	}
+
+	return 256
+}
+
+// Read a file and concurrently peek at the bytes before it is done being read
+//
+// @path: the file path you wish to read
+//
+// @bufSize: the number of bytes to read at a time (min = 10, max = maxLen/4)
+//
+// Type {uint8|uint16|uint32}: this sets the maxLen for how many bytes can be read to the queue before the overflow is used
+func Read[T maxLenOpts](path string, bufSize ...uint) (*Reader, error) {
+	var maxLen uint = getMaxLen[T]()
+
+	var bSize uint = 10
+	if len(bufSize) != 0 {
+		bSize = bufSize[0]
+		if bSize < 10 {
+			bSize = 10
+		}else if bSize > maxLen/4 {
+			bSize = maxLen/4
+		}
+	}
+
+
 	file, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return &Reader{}, err
 	}
 
-	buf := make([]byte, readMaxLen)
+	buf := make([]byte, maxLen)
 	overflow := []byte{}
 	start := uint8(0)
 	ind := uint8(0)
@@ -60,16 +111,16 @@ func Read(path string) (*Reader, error) {
 				continue
 			}
 
-			if size >= readMaxLen {
+			if size >= maxLen {
 				time.Sleep(1 * time.Nanosecond)
 				continue
 			}
 
 			reading = true
 
-			s := readMaxLen - size
-			if s > readBufSize {
-				s = readBufSize
+			s := maxLen - size
+			if s > bSize {
+				s = bSize
 			}
 
 			b, err = reader.Peek(int(s))
@@ -89,8 +140,13 @@ func Read(path string) (*Reader, error) {
 		eof = true
 	}()
 
+	readSave := []readRestore{}
+
 	return &Reader{
 		buf: &buf,
+		maxLen: maxLen,
+		bufSize: bSize,
+
 		overflow: &overflow,
 		start: &start,
 		ind: &ind,
@@ -102,6 +158,9 @@ func Read(path string) (*Reader, error) {
 		reading: &reading,
 		handlingOverflow: &handlingOverflow,
 		handlingDiscard: &handlingDiscard,
+
+		savedBytes: &[][]byte{},
+		readSave: &readSave,
 	}, nil
 }
 
@@ -115,13 +174,73 @@ func (reader *Reader) Get(start uint, size uint) ([]byte, error) {
 		time.Sleep(10 * time.Nanosecond)
 	}
 
+	// handle experimental restore point if enabled
+	if len(*reader.readSave) != 0 {
+		if readSave := (*reader.readSave)[len(*reader.readSave)-1]; readSave.save != 0 {
+			l := uint(len(*reader.savedBytes))
+			i := readSave.save
+			if l > i {
+				i = l - i
+			}else{
+				i = 0
+			}
+	
+			start += *readSave.ind
+	
+			res := []byte{}
+	
+			ln := uint(len((*reader.savedBytes)[i]))
+			end := start + size
+			if end >= ln {
+				end -= ln
+	
+				if s := end - start; s > size {
+					size = s
+				}else{
+					size = 0
+				}
+	
+				res = append(res, (*reader.savedBytes)[i][start:ln]...)
+			}else{
+				return (*reader.savedBytes)[i][start:end], nil
+			}
+	
+			if !readSave.next {
+				return res, ERROR_EOF_Save
+			}
+	
+			for ; size != 0 && i != 0; i-- {
+				ln = uint(len((*reader.savedBytes)[i]))
+				if size >= ln {
+					size -= ln
+					res = append(res, (*reader.savedBytes)[i][:ln]...)
+				}else{
+					res = append(res, (*reader.savedBytes)[i][:size]...)
+					size = 0
+					break
+				}
+			}
+	
+			if size != 0 {
+				ln = uint(len((*reader.savedBytes)[i]))
+				if size >= ln {
+					return append(res, (*reader.savedBytes)[i][:ln]...), ERROR_EOF_Save
+				}else{
+					return append(res, (*reader.savedBytes)[i][:size]...), nil
+				}
+			}
+	
+			return res, nil
+		}
+	}
+
 	end := start + size
-	if end > readMaxLen {
-		for !*reader.eof && *reader.size < readMaxLen {
+	if end > reader.maxLen {
+		for !*reader.eof && *reader.size < reader.maxLen {
 			time.Sleep(1 * time.Nanosecond)
 		}
 
-		s := int(end) - int(readMaxLen)
+		s := int(end) - int(reader.maxLen)
 
 		if s > len(*reader.overflow) {
 			for *reader.handlingOverflow > 0 {
@@ -147,7 +266,7 @@ func (reader *Reader) Get(start uint, size uint) ([]byte, error) {
 			}
 		}
 
-		e := readMaxLen-start
+		e := reader.maxLen-start
 
 		b := make([]byte, size)
 		j := *reader.start + uint8(start)
@@ -259,6 +378,16 @@ func (reader *Reader) PeekToBytes(start uint, delim []byte) ([]byte, error) {
 //
 // if there are no more bytes to remove, a smaller size will be returned with an io.EOF error
 func (reader *Reader) Discard(size uint) (discarded uint, err error) {
+	if len(*reader.savedBytes) != 0 {
+		b, _ := reader.Peek(size)
+		(*reader.savedBytes)[len(*reader.savedBytes)-1] = append((*reader.savedBytes)[len(*reader.savedBytes)-1], b...)
+
+		if len(*reader.readSave) != 0 {
+			*(*reader.readSave)[len(*reader.readSave)-1].ind += size
+			return
+		}
+	}
+	
 	*reader.handlingDiscard++
 
 	for *reader.handlingOverflow > 0 {
@@ -277,10 +406,10 @@ func (reader *Reader) Discard(size uint) (discarded uint, err error) {
 		time.Sleep(10 * time.Nanosecond)
 	}
 
-	if size > readMaxLen {
+	if size > reader.maxLen {
 		j := *reader.start
 		bLen := uint(0)
-		for i := uint(0); i < readMaxLen; i++ {
+		for i := uint(0); i < reader.maxLen; i++ {
 			if (*reader.buf)[j] == 0 {
 				break
 			}
@@ -360,7 +489,7 @@ func (reader *Reader) Discard(size uint) (discarded uint, err error) {
 func (reader *Reader) mergeOverflow() {
 	bLen := uint(0)
 	for i := 0; i < len(*reader.overflow); i++ {
-		if bLen >= readMaxLen || (*reader.buf)[*reader.ind] != 0 {
+		if bLen >= reader.maxLen || (*reader.buf)[*reader.ind] != 0 {
 			break
 		}
 
@@ -444,4 +573,106 @@ func (reader *Reader) Seek(offset int64, whence int) (ret int64, err error) {
 	reader.Reader.Reset(reader.File)
 
 	return ret, err
+}
+
+
+// experimental functions
+
+
+// Experimental:
+// Save creates a new restore point to bring back the next set of discarded bytes
+//
+// note: not all reading methods will support save points, and some may continue to use the file reader
+func (reader *Reader) Save() {
+	*reader.savedBytes = append(*reader.savedBytes, []byte{})
+}
+
+// Experimental:
+// Restore tells the reading functions to start pulling from the restore point chosen
+//
+// @offset[0] says which save index to pill from, starting with the last index at 1
+//
+// if @offset[0] == 0, the save index will be turned off, and the restore point will continue to pull from the original buffer
+//
+// note: this method will append a restore reader to a list, and running the UnRestore method will revert back to the previous restore reader if one was active
+func (reader *Reader) Restore(offset ...uint) {
+	i := uint(1)
+	if len(offset) != 0 {
+		i = offset[0]
+	}
+
+	next := false
+	if len(offset) > 1 && offset[1] != 0 {
+		next = true
+	}
+
+	ind := uint(0)
+	*reader.readSave = append(*reader.readSave, readRestore{
+		save: i,
+		ind: &ind,
+		next: next,
+	})
+}
+
+// Experimental:
+// Restore tells the reading functions to start pulling from the restore point chosen
+//
+// @offset[0] says which save index to pill from, starting with the last index at 1
+//
+// if @offset[0] == 0, the save index will be turned off, and the restore point will continue to pull from the original buffer
+//
+// if @offset[1] == 1, then when the restore point runs out of bytes, the previous restore point, or main reader, will start to get used
+//
+// by default (@offset[1] == 0), if the restore point runs out of bytes, it will return the error `liveread.ERROR_EOF_Save`
+//
+// note: this method will append a restore reader to a list, and running the UnRestore method will revert back to the previous restore reader if one was active
+func (reader *Reader) RestoreReset(offset ...uint) {
+	i := uint(1)
+	if len(offset) != 0 {
+		i = offset[0]
+	}
+
+	next := false
+	if len(offset) > 1 && offset[1] != 0 {
+		next = true
+	}
+
+	ind := uint(0)
+	*reader.readSave = append(*reader.readSave, readRestore{
+		save: i,
+		ind: &ind,
+		next: next,
+	})
+}
+
+// Experimental:
+// UnRestore removes a restore reader from the end of the list
+func (reader *Reader) UnRestore() {
+	if len(*reader.readSave) != 0 {
+		*reader.readSave = (*reader.readSave)[:len(*reader.readSave)-1]
+	}
+}
+
+// Experimental:
+// UnRestoreFirst removes a restore reader from the start of list
+func (reader *Reader) UnRestoreFirst() {
+	if len(*reader.readSave) != 0 {
+		*reader.readSave = (*reader.readSave)[1:]
+	}
+}
+
+// Experimental:
+// DelSave removes the lase restore point and may shift the one being used
+func (reader *Reader) DelSave() {
+	if len(*reader.savedBytes) != 0 {
+		*reader.savedBytes = (*reader.savedBytes)[:len(*reader.savedBytes)-1]
+	}
+}
+
+// Experimental:
+// DelFirstSave removes the first restore point and may shift the one being used
+func (reader *Reader) DelFirstSave() {
+	if len(*reader.savedBytes) != 0 {
+		*reader.savedBytes = (*reader.savedBytes)[1:]
+	}
 }
