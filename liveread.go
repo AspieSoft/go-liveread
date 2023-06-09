@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -187,8 +188,157 @@ func (reader *Reader[T]) Get(start uint, size uint) ([]byte, error) {
 	// handle experimental restore point if enabled
 	if len(*reader.readSave) != 0 {
 		reader.muSave.Lock()
-		defer reader.muSave.Unlock()
 
+		if readSave := (*reader.readSave)[len(*reader.readSave)-1]; readSave.save != 0 {
+			l := uint(len(*reader.savedBytes))
+			i := readSave.save
+			if l > i {
+				i = l - i
+			}else{
+				i = 0
+			}
+	
+			start += *readSave.ind
+	
+			res := []byte{}
+	
+			ln := uint(len((*reader.savedBytes)[i]))
+			end := start + size
+			if end >= ln {
+				end -= ln
+	
+				if s := end - start; s > size {
+					size = s
+				}else{
+					size = 0
+				}
+	
+				res = append(res, (*reader.savedBytes)[i][start:ln]...)
+			}else{
+				reader.muSave.Unlock()
+				return (*reader.savedBytes)[i][start:end], nil
+			}
+	
+			if !readSave.next {
+				reader.muSave.Unlock()
+				return res, ERROR_EOF_Save
+			}
+	
+			for ; size != 0 && i != 0; i-- {
+				ln = uint(len((*reader.savedBytes)[i]))
+				if size >= ln {
+					size -= ln
+					res = append(res, (*reader.savedBytes)[i][:ln]...)
+				}else{
+					res = append(res, (*reader.savedBytes)[i][:size]...)
+					size = 0
+					break
+				}
+			}
+
+			if size != 0 {
+				ln = uint(len((*reader.savedBytes)[i]))
+				if size >= ln {
+					reader.muSave.Unlock()
+					return append(res, (*reader.savedBytes)[i][:ln]...), ERROR_EOF_Save
+				}else{
+					reader.muSave.Unlock()
+					return append(res, (*reader.savedBytes)[i][:size]...), nil
+				}
+			}
+
+			reader.muSave.Unlock()
+			return res, nil
+		}
+
+		reader.muSave.Unlock()
+	}
+
+	end := start + size
+	if end > reader.maxLen {
+		s := int(end) - int(reader.maxLen)
+
+		reader.mu.RLock()
+		for !*reader.eof && *reader.size < reader.maxLen {
+			reader.mu.RUnlock()
+			time.Sleep(reader.readSleep)
+			reader.mu.RLock()
+		}
+
+		if s > len(*reader.overflow) {
+			reader.mu2.Lock()
+			b, _ := reader.Reader.Peek(s - len(*reader.overflow))
+			reader.Reader.Discard(s - len(*reader.overflow))
+			reader.mu2.Unlock()
+
+			*reader.overflow = append(*reader.overflow, b...)
+
+			*reader.size += uint(len(b))
+		}
+
+		e := reader.maxLen-start
+
+		b := make([]byte, size)
+		j := *reader.start + T(start)
+		bLen := uint(0)
+		for i := uint(0); i < e; i++ {
+			if (*reader.buf)[j] == 0 {
+				break
+			}
+			b[i] = (*reader.buf)[j]
+			j++
+			bLen++
+		}
+
+		for i := 0; i < s; i++ {
+			if i >= len((*reader.overflow)) {
+				break
+			}
+			b[e+uint(i)] = (*reader.overflow)[i]
+			bLen++
+		}
+
+		reader.mu.RUnlock()
+
+		if bLen < size {
+			return b[:bLen], io.EOF
+		}
+		return b[:bLen], nil
+	}
+
+	reader.mu.RLock()
+	for !*reader.eof && *reader.size < end {
+		reader.mu.RUnlock()
+		time.Sleep(reader.readSleep)
+		reader.mu.RLock()
+	}
+
+	b := make([]byte, size)
+	j := *reader.start + T(start)
+	bLen := uint(0)
+	for i := uint(0); i < size; i++ {
+		if (*reader.buf)[j] == 0 {
+			break
+		}
+		b[i] = (*reader.buf)[j]
+		j++
+		bLen++
+	}
+
+	reader.mu.RUnlock()
+
+	if bLen < size {
+		return b[:bLen], io.EOF
+	}
+	return b[:bLen], nil
+}
+
+// getLocal is a clone of Get that does not run muSave.lock()
+//
+// note: this method will still run the regular mu.Lock() method
+func (reader *Reader[T]) getLocal(start uint, size uint) ([]byte, error) {
+	// handle experimental restore point if enabled
+	if len(*reader.readSave) != 0 {
 		if readSave := (*reader.readSave)[len(*reader.readSave)-1]; readSave.save != 0 {
 			l := uint(len(*reader.savedBytes))
 			i := readSave.save
@@ -389,17 +539,28 @@ func (reader *Reader[T]) PeekToBytes(start uint, delim []byte) ([]byte, error) {
 // if there are no more bytes to remove, a smaller size will be returned with an io.EOF error
 func (reader *Reader[T]) Discard(size uint) (discarded uint, err error) {
 	// handle experimental restore point if enabled
-	if l := len(*reader.savedBytes); l != 0 {
+	if l := uint(len(*reader.savedBytes)); l != 0 {
 		reader.muSave.Lock()
 
-		b, _ := reader.Peek(size)
-		(*reader.savedBytes)[l-1] = append((*reader.savedBytes)[l-1], b...)
-
 		if len(*reader.readSave) != 0 {
+			saveInd := (*reader.readSave)[len(*reader.readSave)-1].save
+			if si := l - saveInd; si != 0 {
+				fmt.Println(si-1)
+				b, _ := reader.getLocal(0, size)
+
+				// (*reader.savedBytes)[si]
+
+				(*reader.savedBytes)[si-1] = append((*reader.savedBytes)[si-1], b...)
+			}
+			fmt.Println(l - saveInd)
+
 			*(*reader.readSave)[len(*reader.readSave)-1].ind += size
 			reader.muSave.Unlock()
 			return
 		}
+
+		b, _ := reader.Peek(size)
+		(*reader.savedBytes)[l-1] = append((*reader.savedBytes)[l-1], b...)
 
 		reader.muSave.Unlock()
 	}
@@ -722,12 +883,16 @@ func (reader *Reader[T]) UnRestoreFirst() {
 }
 
 // Experimental:
-// DelSave removes the lase restore point and may shift the one being used
+// DelSave removes the last restore point and may shift the one being used
 func (reader *Reader[T]) DelSave() {
 	reader.muSave.Lock()
 
 	if len(*reader.savedBytes) != 0 {
 		*reader.savedBytes = (*reader.savedBytes)[:len(*reader.savedBytes)-1]
+	}
+
+	if len(*reader.readSave) > len(*reader.savedBytes) {
+		*reader.readSave = (*reader.readSave)[:len(*reader.readSave)-1]
 	}
 
 	reader.muSave.Unlock()
@@ -740,6 +905,10 @@ func (reader *Reader[T]) DelFirstSave() {
 
 	if len(*reader.savedBytes) != 0 {
 		*reader.savedBytes = (*reader.savedBytes)[1:]
+	}
+
+	if len(*reader.readSave) > len(*reader.savedBytes) {
+		*reader.readSave = (*reader.readSave)[1:]
 	}
 
 	reader.muSave.Unlock()
