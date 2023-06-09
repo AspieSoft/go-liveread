@@ -203,9 +203,9 @@ func (reader *Reader[T]) Get(start uint, size uint) ([]byte, error) {
 	
 			ln := uint(len((*reader.savedBytes)[i]))
 			end := start + size
-			if end >= ln {
+			if end > ln {
 				end -= ln
-	
+
 				if s := end - start; s > size {
 					size = s
 				}else{
@@ -356,7 +356,7 @@ func (reader *Reader[T]) getLocal(start uint, size uint) ([]byte, error) {
 	
 			ln := uint(len((*reader.savedBytes)[i]))
 			end := start + size
-			if end >= ln {
+			if end > ln {
 				end -= ln
 	
 				if s := end - start; s > size {
@@ -548,7 +548,8 @@ func (reader *Reader[T]) Discard(size uint) (discarded uint, err error) {
 
 		if len(*reader.readSave) != 0 {
 			saveInd := (*reader.readSave)[len(*reader.readSave)-1].save
-			if si := l - saveInd; si != 0 {
+			si := l - saveInd
+			if si != 0 {
 				b, _ := reader.getLocal(0, size)
 				(*reader.savedBytes)[si-1] = append((*reader.savedBytes)[si-1], b...)
 			}
@@ -823,10 +824,9 @@ func (reader *Reader[T]) RestoreReset(offset ...uint) {
 		next = uint8(offset[1])
 	}
 
-	ind := uint(0)
-	(*reader.readSave)[l].ind = &ind
-	(*reader.readSave)[l].next = next
-	(*reader.readSave)[l].save = i
+	*(*reader.readSave)[l-1].ind -= *(*reader.readSave)[l-1].ind
+	(*reader.readSave)[l-1].next = next
+	(*reader.readSave)[l-1].save = i
 
 	reader.muSave.Unlock()
 }
@@ -851,8 +851,7 @@ func (reader *Reader[T]) RestoreResetFirst(offset ...uint) {
 		next = uint8(offset[1])
 	}
 
-	ind := uint(0)
-	(*reader.readSave)[0].ind = &ind
+	*(*reader.readSave)[0].ind -= *(*reader.readSave)[0].ind
 	(*reader.readSave)[0].next = next
 	(*reader.readSave)[0].save = i
 
