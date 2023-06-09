@@ -389,17 +389,19 @@ func (reader *Reader[T]) PeekToBytes(start uint, delim []byte) ([]byte, error) {
 // if there are no more bytes to remove, a smaller size will be returned with an io.EOF error
 func (reader *Reader[T]) Discard(size uint) (discarded uint, err error) {
 	// handle experimental restore point if enabled
-	if len(*reader.savedBytes) != 0 {
+	if l := len(*reader.savedBytes); l != 0 {
 		reader.muSave.Lock()
-		defer reader.muSave.Unlock()
 
 		b, _ := reader.Peek(size)
-		(*reader.savedBytes)[len(*reader.savedBytes)-1] = append((*reader.savedBytes)[len(*reader.savedBytes)-1], b...)
+		(*reader.savedBytes)[l-1] = append((*reader.savedBytes)[l-1], b...)
 
 		if len(*reader.readSave) != 0 {
 			*(*reader.readSave)[len(*reader.readSave)-1].ind += size
+			reader.muSave.Unlock()
 			return
 		}
+
+		reader.muSave.Unlock()
 	}
 
 	reader.mu.Lock()
@@ -611,6 +613,11 @@ func (reader *Reader[T]) Save() {
 // note: this method will append a restore reader to a list, and running the UnRestore method will revert back to the previous restore reader if one was active
 func (reader *Reader[T]) Restore(offset ...uint) {
 	reader.muSave.Lock()
+
+	if len(*reader.savedBytes) == 0 {
+		reader.muSave.Unlock()
+		return
+	}
 
 	i := uint(1)
 	if len(offset) != 0 {
