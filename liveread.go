@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -48,7 +47,7 @@ type Reader[T maxLenOpts] struct {
 type readRestore struct {
 	save uint
 	ind *uint
-	next bool
+	next uint8
 }
 
 type maxLenOpts interface{uint8|uint16}
@@ -212,18 +211,21 @@ func (reader *Reader[T]) Get(start uint, size uint) ([]byte, error) {
 				}else{
 					size = 0
 				}
-	
+
 				res = append(res, (*reader.savedBytes)[i][start:ln]...)
 			}else{
 				reader.muSave.Unlock()
 				return (*reader.savedBytes)[i][start:end], nil
 			}
-	
-			if !readSave.next {
+
+			if readSave.next == 0 {
 				reader.muSave.Unlock()
 				return res, ERROR_EOF_Save
+			}else if readSave.next == 2 {
+				reader.muSave.Unlock()
+				return res, nil
 			}
-	
+
 			for ; size != 0 && i != 0; i-- {
 				ln = uint(len((*reader.savedBytes)[i]))
 				if size >= ln {
@@ -368,8 +370,10 @@ func (reader *Reader[T]) getLocal(start uint, size uint) ([]byte, error) {
 				return (*reader.savedBytes)[i][start:end], nil
 			}
 	
-			if !readSave.next {
+			if readSave.next == 0 {
 				return res, ERROR_EOF_Save
+			}else if readSave.next == 2 {
+				return res, nil
 			}
 	
 			for ; size != 0 && i != 0; i-- {
@@ -545,14 +549,9 @@ func (reader *Reader[T]) Discard(size uint) (discarded uint, err error) {
 		if len(*reader.readSave) != 0 {
 			saveInd := (*reader.readSave)[len(*reader.readSave)-1].save
 			if si := l - saveInd; si != 0 {
-				fmt.Println(si-1)
 				b, _ := reader.getLocal(0, size)
-
-				// (*reader.savedBytes)[si]
-
 				(*reader.savedBytes)[si-1] = append((*reader.savedBytes)[si-1], b...)
 			}
-			fmt.Println(l - saveInd)
 
 			*(*reader.readSave)[len(*reader.readSave)-1].ind += size
 			reader.muSave.Unlock()
@@ -769,6 +768,8 @@ func (reader *Reader[T]) Save() {
 //
 // if @offset[1] == 1, then when the restore point runs out of bytes, the previous restore point, or main reader, will start to get used
 //
+// if @offset[1] == 2, then it will act like `0`, but will return nil in place of an error
+//
 // by default (@offset[1] == 0), if the restore point runs out of bytes, it will return the error `liveread.ERROR_EOF_Save`
 //
 // note: this method will append a restore reader to a list, and running the UnRestore method will revert back to the previous restore reader if one was active
@@ -785,9 +786,9 @@ func (reader *Reader[T]) Restore(offset ...uint) {
 		i = offset[0]
 	}
 
-	next := false
-	if len(offset) > 1 && offset[1] != 0 {
-		next = true
+	next := uint8(0)
+	if len(offset) > 1 {
+		next = uint8(offset[1])
 	}
 
 	ind := uint(0)
@@ -817,9 +818,9 @@ func (reader *Reader[T]) RestoreReset(offset ...uint) {
 		i = offset[0]
 	}
 
-	next := false
-	if len(offset) > 1 && offset[1] != 0 {
-		next = true
+	next := uint8(0)
+	if len(offset) > 1 {
+		next = uint8(offset[1])
 	}
 
 	ind := uint(0)
@@ -845,9 +846,9 @@ func (reader *Reader[T]) RestoreResetFirst(offset ...uint) {
 		i = offset[0]
 	}
 
-	next := false
-	if len(offset) > 1 && offset[1] != 0 {
-		next = true
+	next := uint8(0)
+	if len(offset) > 1 {
+		next = uint8(offset[1])
 	}
 
 	ind := uint(0)
