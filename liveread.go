@@ -604,6 +604,10 @@ func (reader *Reader[T]) Save() {
 //
 // if @offset[0] == 0, the save index will be turned off, and the restore point will continue to pull from the original buffer
 //
+// if @offset[1] == 1, then when the restore point runs out of bytes, the previous restore point, or main reader, will start to get used
+//
+// by default (@offset[1] == 0), if the restore point runs out of bytes, it will return the error `liveread.ERROR_EOF_Save`
+//
 // note: this method will append a restore reader to a list, and running the UnRestore method will revert back to the previous restore reader if one was active
 func (reader *Reader[T]) Restore(offset ...uint) {
 	reader.muSave.Lock()
