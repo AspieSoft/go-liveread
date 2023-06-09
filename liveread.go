@@ -633,19 +633,16 @@ func (reader *Reader[T]) Restore(offset ...uint) {
 }
 
 // Experimental:
-// Restore tells the reading functions to start pulling from the restore point chosen
-//
-// @offset[0] says which save index to pill from, starting with the last index at 1
-//
-// if @offset[0] == 0, the save index will be turned off, and the restore point will continue to pull from the original buffer
-//
-// if @offset[1] == 1, then when the restore point runs out of bytes, the previous restore point, or main reader, will start to get used
-//
-// by default (@offset[1] == 0), if the restore point runs out of bytes, it will return the error `liveread.ERROR_EOF_Save`
-//
-// note: this method will append a restore reader to a list, and running the UnRestore method will revert back to the previous restore reader if one was active
+// RestoreReset will reset the last restore point without creating a new one
 func (reader *Reader[T]) RestoreReset(offset ...uint) {
 	reader.muSave.Lock()
+
+	l := uint(len(*reader.readSave))
+
+	if l == 0 {
+		reader.muSave.Unlock()
+		return
+	}
 
 	i := uint(1)
 	if len(offset) != 0 {
@@ -658,11 +655,37 @@ func (reader *Reader[T]) RestoreReset(offset ...uint) {
 	}
 
 	ind := uint(0)
-	*reader.readSave = append(*reader.readSave, readRestore{
-		save: i,
-		ind: &ind,
-		next: next,
-	})
+	(*reader.readSave)[l].ind = &ind
+	(*reader.readSave)[l].next = next
+	(*reader.readSave)[l].save = i
+
+	reader.muSave.Unlock()
+}
+
+// Experimental:
+// RestoreReset will reset the first restore point without creating a new one
+func (reader *Reader[T]) RestoreResetFirst(offset ...uint) {
+	reader.muSave.Lock()
+
+	if len(*reader.readSave) == 0 {
+		reader.muSave.Unlock()
+		return
+	}
+
+	i := uint(1)
+	if len(offset) != 0 {
+		i = offset[0]
+	}
+
+	next := false
+	if len(offset) > 1 && offset[1] != 0 {
+		next = true
+	}
+
+	ind := uint(0)
+	(*reader.readSave)[0].ind = &ind
+	(*reader.readSave)[0].next = next
+	(*reader.readSave)[0].save = i
 
 	reader.muSave.Unlock()
 }
