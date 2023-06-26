@@ -278,31 +278,40 @@ func (reader *Reader[T]) Get(start uint, size uint) ([]byte, error) {
 			*reader.size += uint(len(b))
 		}
 
+		b := make([]byte, size)
+		bLen := uint(0)
+
 		var e uint
 		if start > reader.maxLen {
 			e = start-reader.maxLen
+
+			for i := 0; i < s && bLen < size; i++ {
+				if i >= len((*reader.overflow)) {
+					break
+				}
+				b[i] = (*reader.overflow)[e+uint(i)]
+				bLen++
+			}
 		}else{
 			e = reader.maxLen-start
-		}
 
-		j := *reader.start + T(start)
-		b := make([]byte, size)
-		bLen := uint(0)
-		for i := uint(0); i < e && bLen < size; i++ {
-			if (*reader.buf)[j] == 0 {
-				break
+			j := *reader.start + T(start)
+			for i := uint(0); i < e && bLen < size; i++ {
+				if (*reader.buf)[j] == 0 {
+					break
+				}
+				b[i] = (*reader.buf)[j]
+				j++
+				bLen++
 			}
-			b[i] = (*reader.buf)[j]
-			j++
-			bLen++
-		}
 
-		for i := 0; i < s && bLen < size; i++ {
-			if i >= len((*reader.overflow)) {
-				break
+			for i := 0; i < s && bLen < size; i++ {
+				if i >= len((*reader.overflow)) {
+					break
+				}
+				b[e+uint(i)] = (*reader.overflow)[i]
+				bLen++
 			}
-			b[e+uint(i)] = (*reader.overflow)[i]
-			bLen++
 		}
 
 		reader.mu.RUnlock()
