@@ -288,7 +288,7 @@ func (reader *Reader[T]) Get(start uint, size uint) ([]byte, error) {
 		j := *reader.start + T(start)
 		b := make([]byte, size)
 		bLen := uint(0)
-		for i := uint(0); i < e; i++ {
+		for i := uint(0); i < e && bLen < size; i++ {
 			if (*reader.buf)[j] == 0 {
 				break
 			}
@@ -297,7 +297,7 @@ func (reader *Reader[T]) Get(start uint, size uint) ([]byte, error) {
 			bLen++
 		}
 
-		for i := 0; i < s; i++ {
+		for i := 0; i < s && bLen < size; i++ {
 			if i >= len((*reader.overflow)) {
 				break
 			}
