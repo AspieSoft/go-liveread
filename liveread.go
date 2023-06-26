@@ -278,10 +278,15 @@ func (reader *Reader[T]) Get(start uint, size uint) ([]byte, error) {
 			*reader.size += uint(len(b))
 		}
 
-		e := reader.maxLen-start
+		var e uint
+		if start > reader.maxLen {
+			e = start-reader.maxLen
+		}else{
+			e = reader.maxLen-start
+		}
 
-		b := make([]byte, size)
 		j := *reader.start + T(start)
+		b := make([]byte, size)
 		bLen := uint(0)
 		for i := uint(0); i < e; i++ {
 			if (*reader.buf)[j] == 0 {

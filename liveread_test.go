@@ -13,6 +13,9 @@ func Test(t *testing.T){
 		return
 	}
 
+	// make sure reader wont crash if something over the uint8 limit is selected
+	reader.PeekByte(257)
+
 	b, err := reader.Get(0, 4)
 	if err != nil {
 		t.Error(err)
